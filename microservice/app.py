@@ -1,21 +1,29 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 from ortools.sat.python import cp_model
 import math
 
 app = FastAPI(title="Timetable Scheduler (OR-Tools)")
 
-# ---------- Input models ----------
 class SubjectIn(BaseModel):
     name: str
+    code: str = Field(..., min_length=5, max_length=5)
     credit: int  # theory classes per week (1-3)
     lab: int = 0  # number of lab blocks (each block = 2 periods)
 
+class SubjectAssignment(BaseModel):
+    subjectName: str
+    sections: List[str]
+    teachesTheory: bool
+    teachesLab: bool
+
 class FacultyIn(BaseModel):
     name: str
-    subjects: List[str]  # names of subjects this faculty can teach (1 or 2)
+    abbr: str
+    assignments: List[SubjectAssignment]
 
+# ---------- Input models ----------
 class Payload(BaseModel):
     sectionsCount: int
     theoryRooms: List[str]     # list of theory room identifiers
@@ -35,22 +43,56 @@ def section_names(n):
 @app.post("/schedule")
 def schedule(payload: Payload):
     # Basic validations
-    min_subjects = 4
-    max_subjects = max(4, payload.sectionsCount)
-    max_periods_per_day = max(6, payload.sectionsCount * 2)
     if not (1 <= payload.sectionsCount <= 6):
         raise HTTPException(status_code=400, detail="sectionsCount must be between 1 and 6.")
-    if not (6 <= payload.periodsPerDay <= max_periods_per_day):
-        raise HTTPException(status_code=400, detail=f"periodsPerDay must be between 6 and {max_periods_per_day} for {payload.sectionsCount} sections.")
-    if not (min_subjects <= len(payload.subjects) <= max_subjects):
-        raise HTTPException(status_code=400, detail=f"For {payload.sectionsCount} sections, the number of subjects must be between {min_subjects} and {max_subjects}.")
-    if len(payload.faculty) < len(payload.subjects):
-        raise HTTPException(status_code=400, detail="The number of faculty must be at least equal to the number of subjects.")
+    if not (8 <= payload.periodsPerDay <= 12):
+        raise HTTPException(status_code=400, detail="periodsPerDay must be between 8 and 12.")
+    if not (4 <= len(payload.subjects) <= 6):
+        raise HTTPException(status_code=400, detail="The number of subjects must be between 4 and 6.")
+    
+    # New validation: ensure every subject in every section has a faculty member assigned.
+    sections_list = section_names(payload.sectionsCount)
     for s in payload.subjects:
-        if not (1 <= s.credit <= 3):
-            raise HTTPException(status_code=400, detail="subject credit must be 1..3")
+        for sec in sections_list:
+            # Check theory coverage if needed
+            if s.credit > 0:
+                is_theory_covered = any(
+                    any(assign.subjectName == s.name and sec in assign.sections and assign.teachesTheory for assign in f.assignments)
+                    for f in payload.faculty
+                )
+                if not is_theory_covered:
+                    raise HTTPException(status_code=400, detail=f"Theory for subject '{s.name}' has no faculty assigned for Section '{sec}'.")
+
+            # Check lab coverage if needed
+            if s.lab > 0:
+                is_lab_covered = any(
+                    any(assign.subjectName == s.name and sec in assign.sections and assign.teachesLab for assign in f.assignments)
+                    for f in payload.faculty
+                )
+                if not is_lab_covered:
+                    raise HTTPException(status_code=400, detail=f"Lab for subject '{s.name}' has no faculty assigned for Section '{sec}'.")
+
+    # Validation: ensure no faculty teaches more than 2 unique subjects.
+    for f in payload.faculty:
+        unique_subjects = {assignment.subjectName for assignment in f.assignments if assignment.subjectName}
+        if len(unique_subjects) > 2:
+            raise HTTPException(status_code=400, detail=f"Faculty '{f.name}' cannot teach more than 2 unique subjects. Found {len(unique_subjects)}.")
+
+    # Validation: ensure all faculty names are unique (case-insensitive)
+    seen_faculty_names = set()
+    for f in payload.faculty:
+        lower_name = f.name.lower()
+        if lower_name in seen_faculty_names:
+            raise HTTPException(status_code=400, detail=f"Faculty names must be unique. Found duplicate: '{f.name}'.")
+        seen_faculty_names.add(lower_name)
+
+    for s in payload.subjects:
+        if not (0 <= s.credit <= 3):
+            raise HTTPException(status_code=400, detail="subject credit must be 0..3")
         if s.lab < 0 or s.lab > 3:
             raise HTTPException(status_code=400, detail="subject lab must be 0..3")
+        if s.credit == 0 and s.lab == 0:
+            raise HTTPException(status_code=400, detail=f"Subject '{s.name}' must have at least one theory or lab class.")
     if len(payload.theoryRooms) < 1:
         raise HTTPException(status_code=400, detail="need at least one theory room")
     if len(payload.labRooms) < 1:
@@ -59,16 +101,31 @@ def schedule(payload: Payload):
     # indexing helpers
     S = payload.sectionsCount
     sections = section_names(S)
+    section_index = {name: i for i, name in enumerate(sections)}
     subj_list = [s.name for s in payload.subjects]
     subj_index = {name: i for i, name in enumerate(subj_list)}
     F = len(payload.faculty)
-    faculty_list = [f.name for f in payload.faculty]
-    # for fast lookup: for each subject, list of faculties who can teach it
-    subj_to_facs = {s: [] for s in subj_list}
+    faculty_info = [{'name': f.name, 'abbr': f.abbr} for f in payload.faculty]
+
+    # for fast lookup: for each (subject, section), list of faculties who can teach theory/lab
+    subj_section_theory_to_facs = {}
+    subj_section_lab_to_facs = {}
+    for subi in range(len(subj_list)):
+        for si in range(S):
+            subj_section_theory_to_facs[(subi, si)] = []
+            subj_section_lab_to_facs[(subi, si)] = []
+
     for fi, f in enumerate(payload.faculty):
-        for sname in f.subjects:
-            if sname in subj_to_facs:
-                subj_to_facs[sname].append(fi)
+        for assignment in f.assignments:
+            if assignment.subjectName in subj_index:
+                subi = subj_index[assignment.subjectName]
+                for sec_name in assignment.sections:
+                    if sec_name in section_index:
+                        si = section_index[sec_name]
+                        if assignment.teachesTheory:
+                            subj_section_theory_to_facs[(subi, si)].append(fi)
+                        if assignment.teachesLab:
+                            subj_section_lab_to_facs[(subi, si)].append(fi)
 
     D = payload.workingDays
     P = payload.periodsPerDay
@@ -127,7 +184,7 @@ def schedule(payload: Payload):
     f_th = {}
     for si in range(S):
         for subi, sname in enumerate(subj_list):
-            facs = subj_to_facs[sname]
+            facs = subj_section_theory_to_facs.get((subi, si), [])
             for d in range(D):
                 for p in range(P):
                     if p == brk: continue
@@ -138,7 +195,7 @@ def schedule(payload: Payload):
     f_lab = {}
     for si in range(S):
         for subi, sname in enumerate(subj_list):
-            facs = subj_to_facs[sname]
+            facs = subj_section_lab_to_facs.get((subi, si), [])
             for d in range(D):
                 for p in range(P - 1):
                     if p == brk or (p + 1) == brk: continue
@@ -150,7 +207,7 @@ def schedule(payload: Payload):
     # Link theory class with exactly one faculty and exactly one theory room when x==1
     for si in range(S):
         for subi, sname in enumerate(subj_list):
-            facs = subj_to_facs[sname]
+            facs = subj_section_theory_to_facs.get((subi, si), [])
             for d in range(D):
                 for p in range(P):
                     if p == brk: continue
@@ -167,7 +224,7 @@ def schedule(payload: Payload):
     # Link lab start with exactly one faculty and exactly one lab room when lstart==1
     for si in range(S):
         for subi, sname in enumerate(subj_list):
-            facs = subj_to_facs[sname]
+            facs = subj_section_lab_to_facs.get((subi, si), [])
             for d in range(D):
                 for p in range(P - 1):
                     if p == brk or (p + 1) == brk: continue
@@ -235,16 +292,14 @@ def schedule(payload: Payload):
                 # theory assignments where f_th == 1
                 for si in range(S):
                     for subi, sname in enumerate(subj_list):
-                        facs = subj_to_facs[sname]
-                        if fid in facs:
-                            key = (si, subi, d, p, fid)
-                            if key in f_th:
-                                terms.append(f_th[key])
+                        key = (si, subi, d, p, fid)
+                        if key in f_th:
+                            terms.append(f_th[key])
                 # labs occupying p: need to include lab starts at p and p-1 with f_lab chosen
                 for si in range(S):
                     for subi, sname in enumerate(subj_list):
-                        facs = subj_to_facs[sname]
-                        if fid in facs:
+                        # Check if this faculty can be assigned to this lab for this section/subject
+                        if (si, subi, d, p, fid) in f_lab or (si, subi, d, p-1, fid) in f_lab:
                             # lab starting at p
                             key1 = (si, subi, d, p, fid)
                             if key1 in f_lab:
@@ -326,8 +381,8 @@ def schedule(payload: Payload):
                     key = (si, subi, d, p)
                     if key in x and solver.Value(x[key]) == 1:
                         room_assigned = next((T_rooms[tr] for tr in range(T) if solver.Value(r_th.get((si, subi, d, p, tr), 0)) == 1), None)
-                        facs = subj_to_facs.get(sname, [])
-                        fac_assigned = next((faculty_list[fid] for fid in facs if solver.Value(f_th.get((si, subi, d, p, fid), 0)) == 1), None)
+                        facs_indices = subj_section_theory_to_facs.get((subi, si), [])
+                        fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_th.get((si, subi, d, p, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": False, "room": room_assigned, "faculty": fac_assigned}
                         break
 
@@ -340,16 +395,16 @@ def schedule(payload: Payload):
                     # Lab starting at p
                     if (si, subi, d, p) in lstart and solver.Value(lstart[(si, subi, d, p)]) == 1:
                         lr_assigned = next((L_rooms[lr] for lr in range(L) if solver.Value(r_lab.get((si, subi, d, p, lr), 0)) == 1), None)
-                        facs = subj_to_facs.get(sname, [])
-                        fac_assigned = next((faculty_list[fid] for fid in facs if solver.Value(f_lab.get((si, subi, d, p, fid), 0)) == 1), None)
+                        facs_indices = subj_section_lab_to_facs.get((subi, si), [])
+                        fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_lab.get((si, subi, d, p, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": True, "room": lr_assigned, "faculty": fac_assigned, "note": "lab start"}
                         break
 
                     # Lab continuing from p-1
                     if p > 0 and (si, subi, d, p - 1) in lstart and solver.Value(lstart[(si, subi, d, p - 1)]) == 1:
                         lr_assigned = next((L_rooms[lr] for lr in range(L) if solver.Value(r_lab.get((si, subi, d, p - 1, lr), 0)) == 1), None)
-                        facs = subj_to_facs.get(sname, [])
-                        fac_assigned = next((faculty_list[fid] for fid in facs if solver.Value(f_lab.get((si, subi, d, p - 1, fid), 0)) == 1), None)
+                        facs_indices = subj_section_lab_to_facs.get((subi, si), [])
+                        fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_lab.get((si, subi, d, p - 1, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": True, "room": lr_assigned, "faculty": fac_assigned, "note": "lab cont."}
                         break
 
@@ -366,6 +421,6 @@ def schedule(payload: Payload):
         "theoryRooms": T_rooms,
         "labRooms": L_rooms,
         "sections": sections,
-        "faculty": faculty_list,
+        "faculty": payload.faculty,
         "subjects": payload.subjects,
     }
