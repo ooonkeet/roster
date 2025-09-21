@@ -8,15 +8,20 @@ app = FastAPI(title="Timetable Scheduler (OR-Tools)")
 
 class SubjectIn(BaseModel):
     name: str
-    code: str = Field(..., min_length=5, max_length=5)
-    credit: int  # theory classes per week (1-3)
-    lab: int = 0  # number of lab blocks (each block = 2 periods)
+    code: str = Field(..., min_length=1, max_length=5, description="A unique code for the subject (1-5 characters).")
+    credit: int = Field(..., ge=0, le=3, description="Number of theory classes per week (0-3).")
+    lab: int = Field(0, ge=0, le=3, description="Number of 2-period lab blocks per week (0-3).")
 
 class SubjectAssignment(BaseModel):
     subjectName: str
     sections: List[str]
     teachesTheory: bool
     teachesLab: bool
+
+class RoomAssignment(BaseModel):
+    subjectName: str
+    sectionName: str
+    roomName: str
 
 class FacultyIn(BaseModel):
     name: str
@@ -28,7 +33,8 @@ class Payload(BaseModel):
     sectionsCount: int
     theoryRooms: List[str]     # list of theory room identifiers
     labRooms: List[str]        # list of lab room identifiers
-    subjectsPerSection: int
+    theoryRoomAssignments: List[RoomAssignment]
+    labRoomAssignments: List[RoomAssignment]
     subjects: List[SubjectIn]
     faculty: List[FacultyIn]
     periodsPerDay: int = 8
@@ -86,11 +92,8 @@ def schedule(payload: Payload):
             raise HTTPException(status_code=400, detail=f"Faculty names must be unique. Found duplicate: '{f.name}'.")
         seen_faculty_names.add(lower_name)
 
+    # Validate that subjects have at least one class
     for s in payload.subjects:
-        if not (0 <= s.credit <= 3):
-            raise HTTPException(status_code=400, detail="subject credit must be 0..3")
-        if s.lab < 0 or s.lab > 3:
-            raise HTTPException(status_code=400, detail="subject lab must be 0..3")
         if s.credit == 0 and s.lab == 0:
             raise HTTPException(status_code=400, detail=f"Subject '{s.name}' must have at least one theory or lab class.")
     if len(payload.theoryRooms) < 1:
@@ -106,6 +109,22 @@ def schedule(payload: Payload):
     subj_index = {name: i for i, name in enumerate(subj_list)}
     F = len(payload.faculty)
     faculty_info = [{'name': f.name, 'abbr': f.abbr} for f in payload.faculty]
+    T_rooms = payload.theoryRooms
+    L_rooms = payload.labRooms
+    T = len(T_rooms)
+    L = len(L_rooms)
+    theory_room_index = {name: i for i, name in enumerate(T_rooms)}
+    lab_room_index = {name: i for i, name in enumerate(L_rooms)}
+
+    # Create assignment maps: (si, subi) -> room_idx
+    theory_assignment_map = {}
+    for assign in payload.theoryRoomAssignments:
+        if assign.subjectName in subj_index and assign.sectionName in section_index and assign.roomName in theory_room_index:
+            theory_assignment_map[(section_index[assign.sectionName], subj_index[assign.subjectName])] = theory_room_index[assign.roomName]
+    lab_assignment_map = {}
+    for assign in payload.labRoomAssignments:
+        if assign.subjectName in subj_index and assign.sectionName in section_index and assign.roomName in lab_room_index:
+            lab_assignment_map[(section_index[assign.sectionName], subj_index[assign.subjectName])] = lab_room_index[assign.roomName]
 
     # for fast lookup: for each (subject, section), list of faculties who can teach theory/lab
     subj_section_theory_to_facs = {}
@@ -131,11 +150,6 @@ def schedule(payload: Payload):
     P = payload.periodsPerDay
     brk = payload.breakPeriod - 1  # zero-index break period
 
-    T_rooms = payload.theoryRooms
-    L_rooms = payload.labRooms
-    T = len(T_rooms)
-    L = len(L_rooms)
-
     # Build CP-SAT model
     model = cp_model.CpModel()
 
@@ -159,26 +173,6 @@ def schedule(payload: Payload):
                     if p == brk or (p + 1) == brk:
                         continue
                     lstart[(si, subi, d, p)] = model.NewBoolVar(f"l_s{si}_u{subi}_d{d}_p{p}")
-
-    # room assignment variables (theory): r_th[s,sub,d,p,tr]
-    r_th = {}
-    for si in range(S):
-        for subi in range(len(subj_list)):
-            for d in range(D):
-                for p in range(P):
-                    if p == brk: continue
-                    for tr in range(T):
-                        r_th[(si, subi, d, p, tr)] = model.NewBoolVar(f"rth_s{si}_u{subi}_d{d}_p{p}_tr{tr}")
-
-    # room assignment variables for lab starts: r_lab[s,sub,d,p,lr]
-    r_lab = {}
-    for si in range(S):
-        for subi in range(len(subj_list)):
-            for d in range(D):
-                for p in range(P - 1):
-                    if p == brk or (p + 1) == brk: continue
-                    for lr in range(L):
-                        r_lab[(si, subi, d, p, lr)] = model.NewBoolVar(f"rlab_s{si}_u{subi}_d{d}_p{p}_lr{lr}")
 
     # faculty assignment variables for theory: f_th[s,sub,d,p,fid]
     f_th = {}
@@ -204,7 +198,7 @@ def schedule(payload: Payload):
 
     # ---------- Linking constraints ----------
 
-    # Link theory class with exactly one faculty and exactly one theory room when x==1
+    # Link theory class with exactly one faculty when x==1
     for si in range(S):
         for subi, sname in enumerate(subj_list):
             facs = subj_section_theory_to_facs.get((subi, si), [])
@@ -212,16 +206,12 @@ def schedule(payload: Payload):
                 for p in range(P):
                     if p == brk: continue
                     xi = x[(si, subi, d, p)]
-                    # sum faculties == xi
                     if facs:
                         model.Add(sum(f_th[(si, subi, d, p, fid)] for fid in facs) == xi)
                     else:
-                        # no faculty can teach this subject -> infeasible
                         model.Add(xi == 0)
-                    # sum theory rooms == xi
-                    model.Add(sum(r_th[(si, subi, d, p, tr)] for tr in range(T)) == xi)
 
-    # Link lab start with exactly one faculty and exactly one lab room when lstart==1
+    # Link lab start with exactly one faculty when lstart==1
     for si in range(S):
         for subi, sname in enumerate(subj_list):
             facs = subj_section_lab_to_facs.get((subi, si), [])
@@ -233,10 +223,6 @@ def schedule(payload: Payload):
                         model.Add(sum(f_lab[(si, subi, d, p, fid)] for fid in facs) == li)
                     else:
                         model.Add(li == 0)
-                    model.Add(sum(r_lab[(si, subi, d, p, lr)] for lr in range(L)) == li)
-
-    # A lab start occupying p and p+1 must forbid theory or other labs for that section at those periods
-    # We'll enforce section occupancy constraints globally below.
 
     # ---------- Demand constraints ----------
 
@@ -289,59 +275,53 @@ def schedule(payload: Payload):
             for p in range(P):
                 if p == brk: continue
                 terms = []
-                # theory assignments where f_th == 1
+                # Collect all theory and lab assignments for this faculty at this specific time slot.
                 for si in range(S):
-                    for subi, sname in enumerate(subj_list):
-                        key = (si, subi, d, p, fid)
-                        if key in f_th:
-                            terms.append(f_th[key])
-                # labs occupying p: need to include lab starts at p and p-1 with f_lab chosen
-                for si in range(S):
-                    for subi, sname in enumerate(subj_list):
-                        # Check if this faculty can be assigned to this lab for this section/subject
-                        if (si, subi, d, p, fid) in f_lab or (si, subi, d, p-1, fid) in f_lab:
-                            # lab starting at p
-                            key1 = (si, subi, d, p, fid)
-                            if key1 in f_lab:
-                                terms.append(f_lab[key1])
-                            # lab starting at p-1 (occupies p)
-                            key0 = (si, subi, d, p - 1, fid)
-                            if key0 in f_lab:
-                                terms.append(f_lab[key0])
+                    for subi in range(len(subj_list)):
+                        # Theory class at this exact time
+                        theory_key = (si, subi, d, p, fid)
+                        if theory_key in f_th:
+                            terms.append(f_th[theory_key])
+                        # Lab class starting at this exact time
+                        lab_start_key = (si, subi, d, p, fid)
+                        if lab_start_key in f_lab:
+                            terms.append(f_lab[lab_start_key])
+                        # Lab class that started in the previous period and occupies this one
+                        lab_cont_key = (si, subi, d, p - 1, fid)
+                        if lab_cont_key in f_lab:
+                            terms.append(f_lab[lab_cont_key])
                 if terms:
                     model.Add(sum(terms) <= 1)
 
     # ---------- Room conflict constraints ----------
-    # For theory rooms: for each theory room tr, day d, p: sum of r_th[...] <= 1
+    # For theory rooms: for each theory room tr, day d, p: sum of classes assigned to this room <= 1
     for tr in range(T):
         for d in range(D):
             for p in range(P):
                 if p == brk: continue
-                model.Add(sum(
-                    r_th[(si, subi, d, p, tr)]
-                    for si in range(S)
-                    for subi in range(len(subj_list))
-                ) <= 1)
+                classes_in_this_room = [
+                    x[(si, subi, d, p)]
+                    for si in range(S) for subi in range(len(subj_list))
+                    if theory_assignment_map.get((si, subi)) == tr
+                ]
+                if classes_in_this_room:
+                    model.Add(sum(classes_in_this_room) <= 1)
 
-    # For lab rooms: a lab starting at p occupies p and p+1 in that lab room
+    # For lab rooms: for each lab room lr, day d, p: sum of labs occupying this period in this room <= 1
     for lr in range(L):
         for d in range(D):
             for p in range(P):
                 if p == brk: continue
-                # collect lab starts that occupy this p (start at p or start at p-1)
-                terms = []
+                labs_occupying_this_room = []
                 for si in range(S):
                     for subi in range(len(subj_list)):
-                        # start at p
-                        key1 = (si, subi, d, p, lr)
-                        if key1 in r_lab:
-                            terms.append(r_lab[key1])
-                        # start at p-1 (then occupies p)
-                        key0 = (si, subi, d, p - 1, lr)
-                        if key0 in r_lab:
-                            terms.append(r_lab[key0])
-                if terms:
-                    model.Add(sum(terms) <= 1)
+                        if lab_assignment_map.get((si, subi)) == lr:
+                            if (si, subi, d, p) in lstart:
+                                labs_occupying_this_room.append(lstart[(si, subi, d, p)])
+                            if p > 0 and (si, subi, d, p - 1) in lstart:
+                                labs_occupying_this_room.append(lstart[(si, subi, d, p - 1)])
+                if labs_occupying_this_room:
+                    model.Add(sum(labs_occupying_this_room) <= 1)
 
     # ---------- Prevent using same room for theory & lab at same time ----------
     # If desirable, ensure that total number of classes (theory assigned to some theory room + labs occupying a lab room) is unconstrained across different room pools.
@@ -380,7 +360,8 @@ def schedule(payload: Payload):
                 for subi, sname in enumerate(subj_list):
                     key = (si, subi, d, p)
                     if key in x and solver.Value(x[key]) == 1:
-                        room_assigned = next((T_rooms[tr] for tr in range(T) if solver.Value(r_th.get((si, subi, d, p, tr), 0)) == 1), None)
+                        room_idx = theory_assignment_map.get((si, subi))
+                        room_assigned = T_rooms[room_idx] if room_idx is not None else None
                         facs_indices = subj_section_theory_to_facs.get((subi, si), [])
                         fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_th.get((si, subi, d, p, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": False, "room": room_assigned, "faculty": fac_assigned}
@@ -394,7 +375,8 @@ def schedule(payload: Payload):
                 for subi, sname in enumerate(subj_list):
                     # Lab starting at p
                     if (si, subi, d, p) in lstart and solver.Value(lstart[(si, subi, d, p)]) == 1:
-                        lr_assigned = next((L_rooms[lr] for lr in range(L) if solver.Value(r_lab.get((si, subi, d, p, lr), 0)) == 1), None)
+                        room_idx = lab_assignment_map.get((si, subi))
+                        lr_assigned = L_rooms[room_idx] if room_idx is not None else None
                         facs_indices = subj_section_lab_to_facs.get((subi, si), [])
                         fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_lab.get((si, subi, d, p, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": True, "room": lr_assigned, "faculty": fac_assigned, "note": "lab start"}
@@ -402,7 +384,8 @@ def schedule(payload: Payload):
 
                     # Lab continuing from p-1
                     if p > 0 and (si, subi, d, p - 1) in lstart and solver.Value(lstart[(si, subi, d, p - 1)]) == 1:
-                        lr_assigned = next((L_rooms[lr] for lr in range(L) if solver.Value(r_lab.get((si, subi, d, p - 1, lr), 0)) == 1), None)
+                        room_idx = lab_assignment_map.get((si, subi))
+                        lr_assigned = L_rooms[room_idx] if room_idx is not None else None
                         facs_indices = subj_section_lab_to_facs.get((subi, si), [])
                         fac_assigned = next((faculty_info[fid] for fid in facs_indices if solver.Value(f_lab.get((si, subi, d, p - 1, fid), 0)) == 1), None)
                         assigned_class = {"section": section_name, "subject": sname, "isLab": True, "room": lr_assigned, "faculty": fac_assigned, "note": "lab cont."}

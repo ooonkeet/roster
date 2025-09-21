@@ -13,6 +13,8 @@ export default function TimetableView({ schedule }) {
 
   let totalTheoryClasses = 0;
   let totalLabClasses = 0;
+  const usedTheoryRooms = new Set();
+  const usedLabRooms = new Set();
 
   sectionNames.forEach(sectionName => {
     const sectionSchedule = schedule.schedules[sectionName];
@@ -20,6 +22,13 @@ export default function TimetableView({ schedule }) {
       sectionSchedule.days.forEach(day => {
         day.periods.forEach(p => {
           if (p && !p.break) {
+            if (p.room) {
+              if (p.isLab) {
+                usedLabRooms.add(p.room);
+              } else {
+                usedTheoryRooms.add(p.room);
+              }
+            }
             if (!p.isLab) {
               totalTheoryClasses++;
             } else if (p.note === 'lab start') {
@@ -30,6 +39,9 @@ export default function TimetableView({ schedule }) {
       });
     }
   });
+
+  const totalTheoryRoomsUsed = usedTheoryRooms.size;
+  const totalLabRoomsUsed = usedLabRooms.size;
 
   return (
     <div>
@@ -49,6 +61,7 @@ export default function TimetableView({ schedule }) {
 
         // Get a unique list of faculty teaching in this section for the legend
         const facultyInThisSection = new Map();
+        const roomsInThisSection = { theory: new Set(), lab: new Set() };
         sectionSchedule.days.forEach(day => {
           day.periods.forEach(p => {
             if (p && p.faculty && p.faculty.abbr) {
@@ -56,10 +69,19 @@ export default function TimetableView({ schedule }) {
                 facultyInThisSection.set(p.faculty.abbr, p.faculty.name);
               }
             }
+            if (p && p.room) {
+              if (p.isLab) {
+                roomsInThisSection.lab.add(p.room);
+              } else {
+                roomsInThisSection.theory.add(p.room);
+              }
+            }
           });
         });
         const facultyListForLegend = Array.from(facultyInThisSection, ([abbr, name]) => ({ abbr, name }))
           .sort((a, b) => a.name.localeCompare(b.name));
+        const theoryRoomsForLegend = Array.from(roomsInThisSection.theory).sort();
+        const labRoomsForLegend = Array.from(roomsInThisSection.lab).sort();
 
         const periodsCount = sectionSchedule.days[0]?.periods.length || 0;
         const periodHeaders = Array.from({ length: periodsCount }, (_, i) => i + 1);
@@ -158,6 +180,28 @@ export default function TimetableView({ schedule }) {
                   </table>
                 </div>
               </div>
+              <div style={{ marginTop: '24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div>
+                  <h5 style={{ marginTop: 0, marginBottom: 8 }}>Classrooms Used</h5>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: '14px' }}>
+                    {theoryRoomsForLegend.length > 0 ? (
+                      theoryRoomsForLegend.map(room => <li key={room}>{room}</li>)
+                    ) : (
+                      <li style={{ listStyle: 'none' }}>None</li>
+                    )}
+                  </ul>
+                </div>
+                <div>
+                  <h5 style={{ marginTop: 0, marginBottom: 8 }}>Labs Used</h5>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: '14px' }}>
+                    {labRoomsForLegend.length > 0 ? (
+                      labRoomsForLegend.map(room => <li key={room}>{room}</li>)
+                    ) : (
+                      <li style={{ listStyle: 'none' }}>None</li>
+                    )}
+                  </ul>
+                </div>
+              </div>
             </div>
           </div>
         );
@@ -180,6 +224,14 @@ export default function TimetableView({ schedule }) {
           <div style={{ border: '1px solid #ddd', padding: '16px', borderRadius: '8px', textAlign: 'center' }}>
             <h3 style={{ margin: 0, color: '#038BB8' }}>{totalFaculty}</h3>
             <p style={{ margin: '4px 0 0', color: '#555' }}>Total Faculty</p>
+          </div>
+          <div style={{ border: '1px solid #ddd', padding: '16px', borderRadius: '8px', textAlign: 'center' }}>
+            <h3 style={{ margin: 0, color: '#038BB8' }}>{totalTheoryRoomsUsed}</h3>
+            <p style={{ margin: '4px 0 0', color: '#555' }}>Total Classrooms Used</p>
+          </div>
+          <div style={{ border: '1px solid #ddd', padding: '16px', borderRadius: '8px', textAlign: 'center' }}>
+            <h3 style={{ margin: 0, color: '#038BB8' }}>{totalLabRoomsUsed}</h3>
+            <p style={{ margin: '4px 0 0', color: '#555' }}>Total Labs Used</p>
           </div>
         </div>
       </div>

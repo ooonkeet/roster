@@ -9,6 +9,8 @@ export default function InputForm() {
   const navigate = useNavigate();
   const [theoryRooms, setTheoryRooms] = useState([]);
   const [labRooms, setLabRooms] = useState([]);
+  const [theoryRoomAssignments, setTheoryRoomAssignments] = useState([{ roomName: "", sections: [""] }]);
+  const [labRoomAssignments, setLabRoomAssignments] = useState([{ roomName: "", assignments: [{ subjectName: "", sections: [] }] }]);
   const [subjects, setSubjects] = useState([{ name: "", code: "", credit: 1, lab: 0 }]);
   const [faculty, setFaculty] = useState([]);
   const [periodsPerDay, setPeriodsPerDay] = useState(8);
@@ -37,10 +39,10 @@ export default function InputForm() {
   const sectionNames = Array.from({ length: sectionsCount }, (_, i) => String.fromCharCode('A'.charCodeAt(0) + i));
 
   // add/remove helpers
-  const addTheoryRoom = () => theoryRooms.length < sectionsCount && setTheoryRooms([...theoryRooms, ""]);
-  const removeTheoryRoom = (i) => setTheoryRooms(theoryRooms.filter((_, idx) => idx !== i));
-  const addLabRoom = () => labRooms.length < sectionsCount && setLabRooms([...labRooms, ""]);
-  const removeLabRoom = (i) => setLabRooms(labRooms.filter((_, idx) => idx !== i));
+  const addTheoryRoom = () => setTheoryRoomAssignments([...theoryRoomAssignments, { roomName: "", sections: [""] }]);
+  const removeTheoryRoom = (i) => setTheoryRoomAssignments(theoryRoomAssignments.filter((_, idx) => idx !== i));
+  const addLabRoom = () => setLabRoomAssignments([...labRoomAssignments, { roomName: "", assignments: [{ subjectName: "", sections: [] }] }]);
+  const removeLabRoom = (i) => setLabRoomAssignments(labRoomAssignments.filter((_, idx) => idx !== i));
   const addSubject = () => subjects.length < maxSubjects && setSubjects([...subjects, { name: "", code: "", credit: 1, lab: 0 }]);
   const removeSubject = (i) => setSubjects(subjects.filter((_, idx) => idx !== i));
   const addFaculty = () => setFaculty([...faculty, { name: "", abbr: "", assignments: [] }]);
@@ -51,15 +53,49 @@ export default function InputForm() {
 
     // simple validation
     if (sectionsCount < 1 || sectionsCount > 6) return alert(`Sections must be 1-6.`);
-    if (theoryRooms.length < 1) return alert("Add at least one theory room");
-    if (labRooms.length < 1) return alert("Add at least one lab room");
     if (subjects.length < minSubjects || subjects.length > maxSubjects) return alert(`Please add between 4 and 6 subjects.`);
 
+    // --- New Room Assignment Validation ---
+    const requiredTheorySections = new Set(sectionNames.filter(sec => subjects.some(s => s.credit > 0)));
+    const assignedTheorySections = new Set(theoryRoomAssignments.flatMap(a => a.sections).filter(Boolean));
+    if (requiredTheorySections.size > 0 && requiredTheorySections.size > assignedTheorySections.size) {
+      return alert("Not all sections with theory classes have been assigned a theory room.");
+    }
+
+    const requiredLabSlots = new Set();
+    subjects.forEach(s => {
+      if (s.lab > 0) {
+        sectionNames.forEach(sec => requiredLabSlots.add(`${s.name}-${sec}`));
+      }
+    });
+    const assignedLabSlots = new Set();
+    labRoomAssignments.forEach(room => {
+      room.assignments.forEach(assign => {
+        assign.sections.forEach(sec => {
+          assignedLabSlots.add(`${assign.subjectName}-${sec}`);
+        });
+      });
+    });
+    if (requiredLabSlots.size > 0 && requiredLabSlots.size > assignedLabSlots.size) {
+      return alert("Not all required lab classes have been assigned a lab room.");
+    }
+
+    for (const assignment of theoryRoomAssignments) {
+      if (!assignment.roomName.trim()) {
+        return alert("All theory rooms must have a name.");
+      }
+      if (assignment.sections.filter(Boolean).length === 0) {
+        return alert(`Room "${assignment.roomName}" is defined but not assigned to any section.`);
+      }
+    }
+
     // Check for empty input fields
-    if (theoryRooms.some(r => !r.trim())) {
+    const allTheoryRoomNames = theoryRoomAssignments.map(a => a.roomName);
+    if (allTheoryRoomNames.some(r => !r.trim())) {
       return alert("All theory rooms must have a name.");
     }
-    if (labRooms.some(r => !r.trim())) {
+    const allLabRoomNames = labRoomAssignments.map(a => a.roomName);
+    if (allLabRoomNames.some(r => !r.trim())) {
       return alert("All lab rooms must have a name.");
     }
 
@@ -82,7 +118,7 @@ export default function InputForm() {
     }
 
     const seenTheoryRooms = new Set();
-    for (const r of theoryRooms) {
+    for (const r of allTheoryRoomNames) {
       if (r) {
         if (seenTheoryRooms.has(r.toLowerCase())) {
           return alert(`Theory room names must be unique. Found duplicate: "${r}".`);
@@ -92,7 +128,7 @@ export default function InputForm() {
     }
 
     const seenLabRooms = new Set();
-    for (const r of labRooms) {
+    for (const r of allLabRoomNames) {
       if (r) {
         if (seenLabRooms.has(r.toLowerCase())) {
           return alert(`Lab room names must be unique. Found duplicate: "${r}".`);
@@ -102,7 +138,7 @@ export default function InputForm() {
     }
 
     // Check for duplicates between theory and lab rooms
-    for (const r of labRooms) {
+    for (const r of allLabRoomNames) {
       if (r && seenTheoryRooms.has(r.toLowerCase())) {
         return alert(`Room names must be unique across theory and lab rooms. Found duplicate: "${r}".`);
       }
@@ -128,7 +164,7 @@ export default function InputForm() {
 
     for (const s of subjects) {
       if (!s.name.trim()) return alert("All subjects must have a name.");
-      if (s.code.trim().length !== 5) return alert(`Subject code for "${s.name || 'Unnamed Subject'}" must be exactly 5 characters long.`);
+      if (s.code.trim().length < 1 || s.code.trim().length > 5) return alert(`Subject code for "${s.name || 'Unnamed Subject'}" must be between 1 and 5 characters long.`);
       if (s.credit < 0 || s.credit > 3) return alert("Credits must be 0-3");
       if (s.lab < 0 || s.lab > 3) return alert("Lab count must be 0-3");
       if (s.credit === 0 && s.lab === 0) return alert(`Subject "${s.name}" must have at least one theory or lab class.`);
@@ -180,10 +216,46 @@ export default function InputForm() {
       return alert("Please fix the following assignment issues:\n- " + validationErrors.join("\n- "));
     }
 
+    // --- New Payload Transformation ---
+    const finalTheoryRooms = [...new Set(theoryRoomAssignments.map(a => a.roomName).filter(Boolean))];
+    const finalLabRooms = [...new Set(labRoomAssignments.map(a => a.roomName).filter(Boolean))];
+
+    const finalTheoryRoomAssignments = [];
+    theoryRoomAssignments.forEach(tra => {
+      if (tra.roomName) {
+        tra.sections.forEach(sectionName => {
+          if (sectionName) {
+            subjects.forEach(s => {
+              if (s.credit > 0) {
+                finalTheoryRoomAssignments.push({
+                  subjectName: s.name,
+                  sectionName: sectionName,
+                  roomName: tra.roomName
+                });
+              }
+            });
+          }
+        });
+      }
+    });
+
+    const finalLabRoomAssignments = [];
+    labRoomAssignments.forEach(lra => {
+      if (lra.roomName) {
+        lra.assignments.forEach(assign => {
+          assign.sections.forEach(sec => {
+            finalLabRoomAssignments.push({ subjectName: assign.subjectName, sectionName: sec, roomName: lra.roomName });
+          });
+        });
+      }
+    });
+
     const payload = {
       sectionsCount,
-      theoryRooms: theoryRooms.filter(Boolean),
-      labRooms: labRooms.filter(Boolean),
+      theoryRooms: finalTheoryRooms,
+      labRooms: finalLabRooms,
+      theoryRoomAssignments: finalTheoryRoomAssignments,
+      labRoomAssignments: finalLabRoomAssignments,
       subjectsPerSection: subjects.length,
       subjects: subjects.map((s) => ({ name: s.name, code: s.code, credit: Number(s.credit), lab: Number(s.lab) })),
       faculty: faculty
@@ -251,6 +323,28 @@ export default function InputForm() {
     return owner.fi !== currentFacultyIdx || owner.ai !== currentAssignmentIdx;
   };
 
+  const assignedLabSlotsMap = useMemo(() => {
+    const map = new Map();
+    labRoomAssignments.forEach((room, roomIndex) => {
+      room.assignments.forEach(assign => {
+        if (assign.subjectName) {
+          assign.sections.forEach(sec => {
+            map.set(`${assign.subjectName}-${sec}`, { roomIndex });
+          });
+        }
+      });
+    });
+    return map;
+  }, [labRoomAssignments]);
+
+  const isLabSlotTakenByOther = (subjectName, sectionName, currentRoomIndex) => {
+    if (!subjectName || !sectionName) return false;
+    const key = `${subjectName}-${sectionName}`;
+    if (!assignedLabSlotsMap.has(key)) return false;
+    const owner = assignedLabSlotsMap.get(key);
+    return owner.roomIndex !== currentRoomIndex;
+  };
+
   const totalAvailableSlots = useMemo(() => {
     let count = 0;
     subjects.forEach(subject => {
@@ -269,6 +363,30 @@ export default function InputForm() {
   }, [subjects, sectionNames]);
 
   const allSlotsAssigned = totalAvailableSlots > 0 && assignedSlots.size >= totalAvailableSlots;
+
+  // --- Memos for new room assignment logic ---
+  const assignedTheorySectionSet = useMemo(() => new Set(theoryRoomAssignments.flatMap(a => a.sections).filter(Boolean)), [theoryRoomAssignments]);
+  const sectionsWithTheory = useMemo(() => new Set(sectionNames.filter(sec => subjects.some(s => s.credit > 0))), [subjects, sectionNames]);
+  const allTheorySectionsAssigned = sectionsWithTheory.size > 0 && assignedTheorySectionSet.size >= sectionsWithTheory.size;
+
+  const allRequiredLabSlots = useMemo(() => {
+    const slots = new Set();
+    subjects.forEach(s => {
+      if (s.lab > 0) sectionNames.forEach(sec => slots.add(`${s.name}-${sec}`));
+    });
+    return slots;
+  }, [subjects, sectionNames]);
+
+  const assignedLabSlotsSet = useMemo(() => {
+    const slots = new Set();
+    labRoomAssignments.forEach(room => {
+      room.assignments.forEach(assign => {
+        if (assign.subjectName) assign.sections.forEach(sec => slots.add(`${assign.subjectName}-${sec}`));
+      });
+    });
+    return slots;
+  }, [labRoomAssignments]);
+  const allLabSlotsAssigned = allRequiredLabSlots.size > 0 && assignedLabSlotsSet.size >= allRequiredLabSlots.size;
 
   return (
     <form onSubmit={handleSubmit} style={{ border: "1px solid #ddd", padding: 12, borderRadius: 8 }}>
@@ -328,48 +446,12 @@ export default function InputForm() {
 
       <hr />
 
-      <div style={{ marginTop: 8 }}>
-        <h4>{`Theory Rooms (max ${sectionsCount})`}</h4>
-        {theoryRooms.map((r, i) => (
-          <div key={i} style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <input value={r} onChange={(e) => setAt(theoryRooms, i, e.target.value, setTheoryRooms)} placeholder={`Theory room #${i + 1}`} />
-            <button type="button" onClick={() => removeTheoryRoom(i)}>
-              Remove
-            </button>
-          </div>
-        ))}
-        <div style={{ marginTop: 6 }}>
-          <button type="button" onClick={addTheoryRoom} disabled={theoryRooms.length >= sectionsCount}>
-            Add theory room
-          </button>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <h4>{`Lab Rooms (max ${sectionsCount})`}</h4>
-        {labRooms.map((r, i) => (
-          <div key={i} style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <input value={r} onChange={(e) => setAt(labRooms, i, e.target.value, setLabRooms)} placeholder={`Lab room #${i + 1}`} />
-            <button type="button" onClick={() => removeLabRoom(i)}>
-              Remove
-            </button>
-          </div>
-        ))}
-        <div style={{ marginTop: 6 }}>
-          <button type="button" onClick={addLabRoom} disabled={labRooms.length >= sectionsCount}>
-            Add lab room
-          </button>
-        </div>
-      </div>
-
-      <hr />
-
       <div style={{ marginTop: 12 }}>
         <h4>{`Subjects (${subjects.length} total, min 4, max ${maxSubjects})`}</h4>
         {subjects.map((s, i) => (
           <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 100px 90px 90px", gap: 8, marginTop: 6 }}>
             <input placeholder="Subject name" value={s.name} onChange={(e) => setAt(subjects, i, { ...s, name: e.target.value }, setSubjects)} />
-            <input placeholder="Code (5 chars)" value={s.code} maxLength="5" onChange={(e) => setAt(subjects, i, { ...s, code: e.target.value }, setSubjects)} />
+            <input placeholder="Code (1-5 chars)" value={s.code} maxLength="5" onChange={(e) => setAt(subjects, i, { ...s, code: e.target.value }, setSubjects)} />
             <input type="number" min="0" max="3" value={s.credit} onChange={(e) => setAt(subjects, i, { ...s, credit: clamp(Number(e.target.value), 0, 3) }, setSubjects)} />
             <input type="number" min="0" max="3" value={s.lab} onChange={(e) => setAt(subjects, i, { ...s, lab: clamp(Number(e.target.value), 0, 3) }, setSubjects)} />
             <div style={{ gridColumn: "1 / -1" }}>
@@ -389,9 +471,216 @@ export default function InputForm() {
       <hr />
 
       <div style={{ marginTop: 12 }}>
+        <h4>Theory Room Allocation</h4>
+        {theoryRoomAssignments.map((assignment, roomIndex) => (
+          <div key={roomIndex} style={{ border: '1px solid #f0f0f0', padding: '8px', marginTop: '8px', borderRadius: '4px' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <input
+                value={assignment.roomName}
+                onChange={(e) => {
+                  const newAssignments = [...theoryRoomAssignments];
+                  newAssignments[roomIndex].roomName = e.target.value;
+                  setTheoryRoomAssignments(newAssignments);
+                }}
+                placeholder={`Theory room name`}
+                style={{ flex: 1 }}
+              />
+              <button type="button" onClick={() => removeTheoryRoom(roomIndex)}>Remove Room</button>
+            </div>
+
+            {assignment.sections.map((sectionName, sectionIndex) => (
+              <div key={sectionIndex} style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 16, marginBottom: 4 }}>
+                <label style={{ flexShrink: 0, width: '60px' }}>Section:</label>
+                <select
+                  value={sectionName}
+                  onChange={(e) => {
+                    const newAssignments = [...theoryRoomAssignments];
+                    newAssignments[roomIndex].sections[sectionIndex] = e.target.value;
+                    setTheoryRoomAssignments(newAssignments);
+                  }}
+                  style={{ flex: 1 }}
+                >
+                  <option value="">-- Select Section --</option>
+                  {sectionNames.filter(sec => sectionsWithTheory.has(sec)).map(sec => {
+                    const isAssigned = assignedTheorySectionSet.has(sec);
+                    const isCurrentlySelected = sectionName === sec;
+                    return <option key={sec} value={sec} disabled={isAssigned && !isCurrentlySelected}>{sec}</option>
+                  })}
+                </select>
+                {assignment.sections.length > 1 && (
+                  <button type="button" style={{ padding: '2px 6px', lineHeight: 1 }} onClick={() => {
+                    const newAssignments = [...theoryRoomAssignments];
+                    newAssignments[roomIndex].sections.splice(sectionIndex, 1);
+                    setTheoryRoomAssignments(newAssignments);
+                  }}>
+                    &times;
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {assignment.sections.length < 2 && assignment.sections[0] && (
+              <button
+                type="button"
+                style={{ marginLeft: 16, marginTop: 4 }}
+                onClick={() => {
+                  const newAssignments = [...theoryRoomAssignments];
+                  newAssignments[roomIndex].sections.push("");
+                  setTheoryRoomAssignments(newAssignments);
+                }}
+                disabled={allTheorySectionsAssigned}
+              >
+                Add another section
+              </button>
+            )}
+          </div>
+        ))}
+        <div style={{ marginTop: 6 }}>
+          <button type="button" onClick={addTheoryRoom} disabled={allTheorySectionsAssigned}>
+            Add Theory Room
+          </button>
+        </div>
+      </div>
+
+      <hr />
+
+      <div style={{ marginTop: 12 }}>
+        <h4>Lab Room Allocation</h4>
+        {labRoomAssignments.map((labRoom, roomIndex) => {
+          const currentAssignmentsInRoom = labRoom.assignments.reduce((acc, a) => acc + a.sections.length, 0);
+
+          return (
+            <div key={roomIndex} style={{ border: '1px solid #f0f0f0', padding: '8px', marginTop: '8px', borderRadius: '4px' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <input
+                value={labRoom.roomName}
+                onChange={e => {
+                  const newAssignments = [...labRoomAssignments];
+                  newAssignments[roomIndex].roomName = e.target.value;
+                  setLabRoomAssignments(newAssignments);
+                }}
+                placeholder="Lab room name"
+                style={{ flex: 1 }}
+              />
+              <button type="button" onClick={() => removeLabRoom(roomIndex)}>Remove Room</button>
+            </div>
+
+            {labRoom.assignments.map((assign, assignIndex) => {
+              return (
+              <div key={assignIndex} style={{ marginLeft: 16, borderLeft: '2px solid #ccc', paddingLeft: 8, marginBottom: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <select
+                    value={assign.subjectName}
+                    onChange={e => {
+                      const newAssignments = [...labRoomAssignments];
+                      newAssignments[roomIndex].assignments[assignIndex].subjectName = e.target.value;
+                      newAssignments[roomIndex].assignments[assignIndex].sections = []; // Reset sections on subject change
+                      setLabRoomAssignments(newAssignments);
+                    }}
+                  >
+                    <option value="">-- Select Subject --</option>
+                    {subjects.filter(s => s.lab > 0).map(s => {
+                      const isCurrentlySelected = s.name === assign.subjectName;
+                      // A subject is available if it has at least one section that is not taken by another room,
+                      // and not already assigned to this same subject in another row within this room.
+                      const hasAvailableSection = sectionNames.some(secName => {
+                        const takenByOtherRoom = isLabSlotTakenByOther(s.name, secName, roomIndex);
+                        const takenBySameSubjectInThisRoom = labRoom.assignments.some((otherAssign, otherIdx) =>
+                          assignIndex !== otherIdx && otherAssign.subjectName === s.name && otherAssign.sections.includes(secName)
+                        );
+                        return !takenByOtherRoom && !takenBySameSubjectInThisRoom;
+                      });
+
+                      const isDisabled = !hasAvailableSection && !isCurrentlySelected;
+                      return <option key={s.name} value={s.name} disabled={isDisabled}>{s.name}</option>;
+                    })}
+                  </select>
+                  <button type="button" onClick={() => {
+                    const newAssignments = [...labRoomAssignments];
+                    newAssignments[roomIndex].assignments.splice(assignIndex, 1);
+                    setLabRoomAssignments(newAssignments);
+                  }}>Remove Subject</button>
+                </div>
+                <div style={{ marginTop: 4, fontSize: '12px' }}>
+                  <strong>Sections (max 6 per room):</strong>
+                  {sectionNames.map(secName => {
+                    const isChecked = assign.sections.includes(secName);
+                    const isTakenElsewhere = isLabSlotTakenByOther(assign.subjectName, secName, roomIndex);
+                    // A section is non-tickable if it's already ticked for the SAME subject in another row in THIS room.
+                    const isTakenBySameSubjectInThisRoom = labRoom.assignments.some((otherAssign, otherIdx) =>
+                      assignIndex !== otherIdx &&
+                      otherAssign.subjectName === assign.subjectName &&
+                      otherAssign.sections.includes(secName)
+                    );
+                    const isRoomFull = currentAssignmentsInRoom >= 6 && !isChecked;
+                    return (
+                      <label key={secName} style={{ marginRight: 8, marginLeft: 4, opacity: isTakenElsewhere || isTakenBySameSubjectInThisRoom ? 0.5 : 1 }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={!assign.subjectName || isRoomFull || isTakenElsewhere || isTakenBySameSubjectInThisRoom}
+                          onChange={e => {
+                            const newAssignments = [...labRoomAssignments];
+                            const currentSections = newAssignments[roomIndex].assignments[assignIndex].sections;
+                            const newSections = e.target.checked
+                              ? [...currentSections, secName]
+                              : currentSections.filter(s => s !== secName);
+                            newAssignments[roomIndex].assignments[assignIndex].sections = newSections;
+                            setLabRoomAssignments(newAssignments);
+                          }}
+                        /> {secName}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )})}
+            <button
+              type="button"
+              style={{ marginLeft: 16 }}
+              disabled={currentAssignmentsInRoom >= 6 || allLabSlotsAssigned}
+              onClick={() => {
+                const newAssignments = [...labRoomAssignments];
+                newAssignments[roomIndex].assignments.push({ subjectName: "", sections: [] });
+                setLabRoomAssignments(newAssignments);
+              }}
+            >
+              Add Subject to Room
+            </button>
+          </div>
+        )})}
+        <div>
+          <button type="button" onClick={addLabRoom} disabled={allLabSlotsAssigned}>Add Lab Room</button>
+        </div>
+      </div>
+
+      <hr />
+
+      <div style={{ marginTop: 12 }}>
         <h4>{`Faculty (${faculty.length} total)`}</h4>
         {faculty.map((f, facultyIdx) => {
           const uniqueSubjects = new Set(f.assignments.map(a => a.subject).filter(Boolean));
+
+          // Determine if this faculty can take on any new assignments.
+          // This is true if there is at least one unassigned class slot (theory or lab)
+          // for a subject that this faculty is eligible to teach (i.e., not exceeding the 2-subject limit).
+          let canTakeNewAssignment = false;
+          for (const s of subjects) {
+            if (!s.name) continue;
+
+            const canTeachSubject = uniqueSubjects.size < 2 || uniqueSubjects.has(s.name);
+            if (!canTeachSubject) continue;
+
+            for (const secName of sectionNames) {
+              const theoryNeededAndAvailable = s.credit > 0 && !assignedSlots.has(`${s.name}-${secName}-theory`);
+              const labNeededAndAvailable = s.lab > 0 && !assignedSlots.has(`${s.name}-${secName}-lab`);
+              if (theoryNeededAndAvailable || labNeededAndAvailable) {
+                canTakeNewAssignment = true;
+                break;
+              }
+            }
+            if (canTakeNewAssignment) break;
+          }
 
           return (
             <div key={facultyIdx} style={{ border: "1px solid #eee", padding: 8, marginTop: 6 }}>
@@ -527,6 +816,7 @@ export default function InputForm() {
                   setFaculty(newFaculty);
                 }}
                 style={{ marginLeft: 16 }}
+                disabled={!canTakeNewAssignment}
               >
                 Add Assignment
               </button>
