@@ -1,20 +1,51 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { generateSchedule } from "../api";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v || 0));
 
+const getInitialData = () => {
+  try {
+    const saved = localStorage.getItem('inputFormData');
+    if (!saved) return null;
+
+    const { data, timestamp } = JSON.parse(saved);
+    const TEN_MINUTES = 10 * 60 * 1000;
+
+    if (Date.now() - timestamp > TEN_MINUTES) {
+      localStorage.removeItem('inputFormData');
+      return null;
+    }
+    return data;
+  } catch (e) {
+    console.error("Error loading form data from storage:", e);
+    localStorage.removeItem('inputFormData');
+    return null;
+  }
+};
+
+const initialData = getInitialData();
+
 export default function InputForm() {
-  const [sectionsCount, setSectionsCount] = useState(1); // max 6
+  const [sectionsCount, setSectionsCount] = useState(initialData?.sectionsCount ?? 1); // max 6
   const navigate = useNavigate();
   const [theoryRooms, setTheoryRooms] = useState([]);
   const [labRooms, setLabRooms] = useState([]);
-  const [theoryRoomAssignments, setTheoryRoomAssignments] = useState([{ roomName: "", sections: [""] }]);
-  const [labRoomAssignments, setLabRoomAssignments] = useState([{ roomName: "", assignments: [{ subjectName: "", sections: [] }] }]);
-  const [subjects, setSubjects] = useState([{ name: "", code: "", credit: 1, lab: 0 }]);
-  const [faculty, setFaculty] = useState([]);
-  const [periodsPerDay, setPeriodsPerDay] = useState(8);
-  const [breakPeriod, setBreakPeriod] = useState(4); // 1-indexed
+  const [theoryRoomAssignments, setTheoryRoomAssignments] = useState(initialData?.theoryRoomAssignments ?? [{ roomName: "", sections: [""] }]);
+  const [labRoomAssignments, setLabRoomAssignments] = useState(initialData?.labRoomAssignments ?? [{ roomName: "", assignments: [{ subjectName: "", sections: [] }] }]);
+  const [subjects, setSubjects] = useState(initialData?.subjects ?? [{ name: "", code: "", credit: 1, lab: 0 }]);
+  const [faculty, setFaculty] = useState(initialData?.faculty ?? []);
+  const [periodsPerDay, setPeriodsPerDay] = useState(initialData?.periodsPerDay ?? 8);
+  const [breakPeriod, setBreakPeriod] = useState(initialData?.breakPeriod ?? 4); // 1-indexed
+
+  useEffect(() => {
+    const formState = { sectionsCount, theoryRoomAssignments, labRoomAssignments, subjects, faculty, periodsPerDay, breakPeriod };
+    const dataToSave = {
+      data: formState,
+      timestamp: Date.now(),
+    };
+    localStorage.setItem('inputFormData', JSON.stringify(dataToSave));
+  }, [sectionsCount, theoryRoomAssignments, labRoomAssignments, subjects, faculty, periodsPerDay, breakPeriod]);
 
   // Persists the schedule and navigates to the timetable view.
   const persistAndNavigate = (data) => {
@@ -23,6 +54,19 @@ export default function InputForm() {
       navigate('/timetable');
     } else {
       localStorage.removeItem('timetableData');
+    }
+  };
+
+  const handleClearForm = () => {
+    if (window.confirm("Are you sure you want to clear the form? All progress will be lost.")) {
+      setSectionsCount(1);
+      setTheoryRoomAssignments([{ roomName: "", sections: [""] }]);
+      setLabRoomAssignments([{ roomName: "", assignments: [{ subjectName: "", sections: [] }] }]);
+      setSubjects([{ name: "", code: "", credit: 1, lab: 0 }]);
+      setFaculty([]);
+      setPeriodsPerDay(8);
+      setBreakPeriod(4);
+      localStorage.removeItem('inputFormData');
     }
   };
 
@@ -831,9 +875,12 @@ export default function InputForm() {
       </div>
 
       <hr />
-      <div style={{ marginTop: 12 }}>
+      <div style={{ marginTop: 12, display: 'flex', gap: '8px', alignItems: 'center' }}>
         <button type="submit" title="Generate and view timetable">
           Generate Timetable
+        </button>
+        <button type="button" onClick={handleClearForm} title="Clear all fields and start over" style={{ backgroundColor: '#dc3545', color: 'white' }}>
+          Clear Form
         </button>
       </div>
     </form>
